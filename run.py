@@ -86,7 +86,7 @@ def prg_2mesh():
     s.randLayerConnections = [(0,1,.5,80.,1),(1,1,.3,50.,10.),(1,0,.4,20,5.),
                               (0,2,.5,80.,1),(2,2,.3,50.,10.),(2,0,.4,20,5.),
                               (0,3,.5,80.,1),(3,3,.3,50.,10.),(3,0,.4,20,5.),]
-    #s.randCurrent = [(1.,20.)]#,(30.,10.),(50.,10.),(70.,10.)]
+    s.randCurrent = [(1.,20.)]#,(30.,10.),(50.,10.),(70.,10.)]
     #s.relaxAt = 50.
         
     #s.showSyns = True
@@ -104,17 +104,21 @@ def prg_2mesh():
     axr = s.fig.add_subplot(s.subplotIndx+1, sharex=s.axes[0])    
         
     spall = np.zeros((0,2))
-    for l in range(len(s.nneusUser)):
-        start = sum(s.nneusUser[:l])        
-        spikeRates = np.asarray([(i,np.sum(s.spikeRaster[start:(start+s.nneus[l]),i:(i+rwnd)])/s.nneusUser[l])
-                                     for i in range(rwnd,s.iterations-rwnd)])
-        axr.plot(spikeRates[:,0], spikeRates[:,1], label = 'Layer %d' % l)
-        spall = np.vstack((spall,spikeRates))
-    axr.legend()
-    axr.set_xlim(0,s.iterations)
-    axr.set_title('Average f.rates')
-    np.save('sprates', spall)
-    s.axes.append(axr)    
+    try:
+        for l in range(len(s.nneusUser)):
+            start = sum(s.nneusUser[:l])        
+            spikeRates = np.asarray([(i,np.sum(s.spikeRaster[start:(start+s.nneus[l]),i:(i+rwnd)])/s.nneusUser[l])
+                                         for i in range(rwnd,s.iterations-rwnd)])
+            print(spikeRates.shape)
+            axr.plot(spikeRates[:,0], spikeRates[:,1], label = 'Layer %d' % l)
+            spall = np.vstack((spall,spikeRates))
+        axr.legend()
+        axr.set_xlim(0,s.iterations)
+        axr.set_title('Average f.rates')
+        np.save('sprates', spall)
+        s.axes.append(axr)    
+    except IndexError:
+        print("Could not plot spike rates")
     #plt.savefig('result.png')
     
 def prg_Big():
