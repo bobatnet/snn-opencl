@@ -62,6 +62,62 @@ inline float2 x_RK_RS(float x, float u, float cur, float dt) {
 #define _gc  __global uchar
 #define _gs  __global short
 
+__kernel void
+spikedLog3(_gf *spkd, _gc *hasSpkd, _gf *spksOut, _gi *offsets, 
+           _gi *logSpk, _gi *logSpkOut,
+           _gi *logLayrOffset, _gi *logItrOffset, _gi *itr, _gf *ctime)
+{
+    /* WI[0], WI[1]: neuron number ;       WI[2]: layer number 
+       WG[0] = 32; WG[1] = 1; WG[2] = 1;
+       Each work item should correspond to a neuron and each work group to group of 32 neurons
+    */
+
+    size_t x = get_global_id(0) + get_global_id(1) + get_global_id(2);    
+#ifdef DEBOUT  
+    if (x == 0) DEBPRINT    
+#endif
+    int layr = get_global_id(2);
+    
+    size_t nNum = get_global_size(0)*get_global_id(1)+get_global_id(0);
+    unsigned int absPos = offsets[layr] + nNum;
+
+    __local unsigned int spikedInt, spkoutInt;
+    spikedInt = 0; 
+    spkoutInt = 0;
+
+    bool isSpkd = 0, isSpkOut = 0;
+
+    if (absPos < offsets[layr+1]) {
+        if (hasSpkd[absPos] > 0) {
+            isSpkd = fabs(spkd[absPos] - *ctime) < (0.5F*DT);
+            isSpkOut = fabs(spksOut[absPos] - *ctime) < (0.5F*DT);		   
+        }
+    }
+    
+    barrier(CLK_GLOBAL_MEM_FENCE);
+
+    unsigned int sd = (isSpkd) << (31 - (nNum % 32));
+    unsigned int so = (isSpkOut) << (31 - (nNum % 32));
+
+    atomic_or(&spikedInt, sd);
+    atomic_or(&spkoutInt, so);
+
+    unsigned int globalIndex = logLayrOffset[layr] + (*logItrOffset)*(*itr);  
+
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    if ((nNum % 32) == 0) {
+        if (absPos < offsets[layr+1]) {
+//            logSpk[globalIndex + nNum] = 0xFF; //spikedInt;
+//            logSpkOut[globalIndex + nNum] = 0xFF; //spkoutInt;
+//            atomic_max(&logSpk[globalIndex+nNum],get_global_id(0));
+            logSpk[globalIndex+ (nNum >> 5)] = spikedInt;
+            logSpkOut[globalIndex+ (nNum >> 5)] = spkoutInt;
+//            logSpkOut[globalIndex+1] = 1;
+        }
+    }
+}
+
 /*
 TODO:       get_global_id(2) (8 bits):      <neuron indx. 0> [8-k bits] | <layr indx> [k bits]
 */
@@ -77,25 +133,29 @@ spikedLog2(_gf *spkd, _gc *hasSpkd, _gf *spksOut, _gi *offsets,
 #endif
     int layr = get_global_id(2);
     
-#ifndef USING_AMD    
-    int nind = (get_global_size(0)*get_global_id(1)+get_global_id(0)) << 3;  /* nind restarts for every layer */
-    int absPos = offsets[layr] + nind;
+#if USING_AMD == 0   
+    unsigned int nind = (get_global_size(0)*get_global_id(1)+get_global_id(0)) * 8;  /* nind restarts for every layer */
+    unsigned int absPos = offsets[layr] + nind;
         
-	unsigned int bI = (nind >> 5) + logLayrOffset[layr] + (*logItrOffset)*(*itr);    
-	__global unsigned char* logSpkByte = &logSpk[bI];
+    unsigned int bI = (nind/32) + logLayrOffset[layr] + (*logItrOffset)*(*itr);    
+    __global unsigned char* logSpkByte = &logSpk[bI];
     __global unsigned char* logSpkOutByte = &logSpkOut[bI];
-	int b = 0, c = 0, maxN;
-	unsigned char zz = 0, zy = 0;
+    int b = 0, c = 0;
+    unsigned char zz = 0, zy = 0;
+    unsigned int maxN;
+    const unsigned int eight = 8;
+
+    maxN = max(eight, offsets[layr+1]-absPos);
 	
-	maxN = max(8,offsets[layr+1]-absPos);
-	
-	for (char i = 0; i < maxN && i >= 0; i++) {
-		b = fabs(spkd[absPos+i] - *ctime) < (0.5F*DT);		
-		zz |= b << i;
-        c = fabs(spksOut[absPos+i] - *ctime) < (0.5F*DT);		
-		zy |= b << i;        
-	}	
-	logSpkByte[(nind >> 3) & 3] = zz;
+    for (int i = 0; i < maxN && i >= 0; i++) {
+        if (hasSpkd[absPos+i] > 0) {
+            b = fabs(spkd[absPos+i] - *ctime) < (0.5F*DT);		
+            zz |= b << i;
+            c = fabs(spksOut[absPos+i] - *ctime) < (0.5F*DT);		
+            zy |= b << i;
+        }        
+    }	
+    logSpkByte[(nind >> 3) & 3] = zz;
     logSpkOutByte[(nind >> 3) & 3] = zy;
     
 #else /* USING_AMD */
@@ -227,7 +287,7 @@ iterate_RS(_gf *pot, _gf *rec, _gf *cur, _gf *inscur,
         //if (absPos == 0) printf("@%d %f %f\n",absPos,c,ii);
         inscur[absPos] = 0;
         
-        float2 uv = x_RK_RS(p,r,c+ii, DT);
+        float2 uv = x_RK_RS(p,r, c + ii, DT);
         if (p >= 30) {
             //printf("N %d\n", absPos);
                 spksOut[absPos] = *ctime;

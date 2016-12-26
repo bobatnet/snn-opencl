@@ -5,23 +5,23 @@ import matplotlib
 matplotlib.use('Qt4Agg')
 import matplotlib.pyplot as plt
 # from itertools import permutations as perm
-from time import clock, sleep
+from time import sleep, time
 from threading import Timer
 from inspect import getouterframes, currentframe
 from sys import stdout
-import sys
-import pdb
 from collections import defaultdict
-import pickle
+
+tpWeight = np.float32
 
 def timeDisplay(interval):
-    stime = clock()
+    stime = time()
     val = {'stp': 0, 'timer': []}
     
-    def timedExec():
+    def timedExec(statusfn, maxstatus):
         '''Exec at intervals'''
-        print('Elapsed %1d sec.' % (clock() - stime))
-        val['timer'] = Timer(interval, timedExec)
+        st = statusfn()
+        print('Elapsed %1d sec, completed ~ %d/%d (%.2f p.c).' % (time() - stime, st, maxstatus, float(st)/maxstatus))
+        val['timer'] = Timer(interval, lambda : timedExec(statusfn,maxstatus))
         val['timer'].start()
 
     def reset():
@@ -33,7 +33,7 @@ def timeDisplay(interval):
         val['stp'] += 1
         ln = getouterframes(currentframe())[1]
         print('%1d> Line %1d: elapsed %1d sec. %s' %
-              (val['stp'], ln[2], clock() - stime, str))
+              (val['stp'], ln[2], time() - stime, str))
     return (step, timedExec, reset)
 
 def offsets2(nneus, syns):
@@ -61,23 +61,37 @@ def offsets2(nneus, syns):
                     z = gps.next()
                 except StopIteration:
                     if (l < maxPn):
-                        repeat = True
-                while (z[0] > l) or repeat:
+                        repeat = True                            
+                while repeat or (z[0] > l):
                     if (l > maxPn):
                         raise StopIteration
                     yield (l, [])
                     l += 1
                 l = z[0] + 1
                 yield z[0], list(z[1])
-        sPreOffs, sPreNs, sWeights, maxPreN, postNCount =                 \
-            reduce(lambda (offs, ns, wts, maxPreN, postCount), (postN, pres):
-                   (lambda pres=list(pres):
-                    (offs + [len(pres) + offs[-1]],
-                     ns + map(pre4mSyn, pres),
-                     wts + map(wt4mSyn, pres),
-                     max([len(pres), maxPreN]),
-                     postCount + 1))(),
-                   get_gps(), (sPreOffs, sPreNs, sWeights, maxPreN, 0))
+#        try:
+#            sPreOffs, sPreNs, sWeights, maxPreN, postNCount =                 \
+#                reduce(lambda (offs, ns, wts, maxPreN, postCount), (postN, pres):
+#                       (lambda pres=list(pres):
+#                        (offs + [len(pres) + offs[-1]],
+#                         ns + map(pre4mSyn, pres),
+#                         wts + map(wt4mSyn, pres),
+#                         max([len(pres), maxPreN]),
+#                         postCount + 1))(),
+#                       get_gps(), (sPreOffs, sPreNs, sWeights, maxPreN, 0))
+           
+        postNCount = 0
+        for (postN, pres) in get_gps():
+            pres = list(pres)
+            sPreOffs.append(len(pres) + sPreOffs[-1])
+            sPreNs.extend(map(pre4mSyn, pres))
+            sWeights.extend(map(wt4mSyn, pres))
+            maxPreN = max(len(pres), maxPreN)
+            postNCount += 1
+               
+#        except UnboundLocalError:
+#            print("Error: Every layer should have some incoming synapse")
+#            raise()
         #gps = list(itertools.groupby(syn, key = post4mSyn))
         #sPreOff = [len(list(gps[i][1])) for i in range(syn[-1][1]) if i in map(lambda x:x[0], gps)]
         # sPreOffs.extend(sPreOff)
@@ -86,8 +100,9 @@ def offsets2(nneus, syns):
     sPreOffs = np.array(sPreOffs, dtype=np.int32)
     sOffsets = np.array([sum(sOffsets[0:i])
                          for i in range(len(sOffsets))], dtype=np.int32)
+#    print(sPreNs)
     sPreNs = np.array(sPreNs, dtype=np.int32)
-    sWeights = np.array(sWeights, dtype=np.float32)
+    sWeights = np.array(sWeights, dtype=tpWeight)
     return (sPreNs, sPreOffs, sOffsets, sWeights, nOffsets, maxPreN)
 
 class snn:
@@ -111,20 +126,33 @@ class snn:
         s.randLayerConnections = []
         s.delays = []
         s.delay_buff_len = 100
+        s.defWt = 0        # keep 0
+        s.minWt = 0.001
         
-        s.randSyns = False
-        s.showSyns = False
         s.currentAt = {}  # {(layr,neu): mA}
         s.randCurrent = False
         s.relaxAt = None
+        s.resetAt = []
+        
+        s.randSyns = False
+
+        s.stoptime, s.dt = 20.0, 0.1
+        
         s.plasticity_params = {'A2minus': 7.0E-3, 'A3minus': 2.3E-4, 'A2plus': 5.0E-10, 'A3plus': 6.2E-3, 'WFactor': 10.0, 'TAU_R1': 50.0, 'TAU_R2': 20.0, 'TAU_O1': 10.0, 'TAU_O2': 500.0}        
         #Pfister2006a, Table 4
         s.plasticity_params = {'A2minus': 3.0E-3, 'A3minus': 7.5E-9, 'A2plus': 4.6E-3, 'A3plus': 9.1E-3, 'WFactor': 1.0, 'TAU_R1': .168, 'TAU_R2': 5.75, 'TAU_O1': .337, 'TAU_O2': .47}        
         s.plasticity = False
+
         s.timed = True
+        s.make_logs = {'potential': False, 'spike': False, 'weight': False}
         # potential, current, spiked, weight
         s.enable_Log = (True, False, False, False) # potn_like, xx, spike plot, weights
+        s.nTrace = []       # trace neuron potentials
 
+        s.recordSpikes = False
+
+        s.save_arrays = False
+        s.showSyns = False
         s.multiple_runs = False
         s.plot_lines = []
         s.plot_int = False
@@ -132,23 +160,20 @@ class snn:
         s.enable_RunStats = True
         s.autoCropStart = True
 
-        s.stoptime, s.dt = 20.0, 0.1
         s.outNeu = [-1]
         s.singleItr = False
 
-        s.K_DEFN = {}
-        s.resetAt = []
-        s.defWt = 10.
-        s.nTrace = []
         s.norm_weights = True
         s.printBufs = False
         s.extraplots = 0
+
+        s.K_DEFN = {}
 
         if prog == 'classify_test':
             # TODO: mark
             s.nneus = [4,15,3]#[4,5]
             s.spikeTm = {10: [(2, 1)]}
-            s.spikeTm = {0.833:[(0,3)], 1.187: [(0,2)], 3.89: [(0,0)], 7.5: [(0,1)], 10.0: [(2,0)], 25.0: [(2,1)], 25.0: [(2,2)]}
+            s.spikeTm = {0.833:[(0,3)], 1.187: [(0,2)], 3.89: [(0,0)], 7.5: [(0,1)], 10.0: [(2,0)], 25.0: [(2,1)]}
             outtimes = [10.0, 25.0, 25.1]
             s.spikeTm =  dict([(t,[s.absToNeu(n,(0,0))]) for (n,t) in zip(range(sum(s.nneus),0,-1),reversed(outtimes))])
             intimes = [5, 7, 9, 3]
@@ -172,6 +197,15 @@ class snn:
 
     def init(self):
         s = self
+        
+        s.timeOfItr = lambda itr: s.dt * itr
+        
+        s.enable_Log = (s.make_logs['potential'], False, s.make_logs['spike'], s.make_logs['weight'])
+
+        if s.timed:  s.tstep, s.ttimed, s.reset = timeDisplay(10)
+        else:        s.tstep, s.ttimed, s.reset = lambda _: (), lambda (_,__): (), lambda: ()
+
+#        assert(all(np.ceil(np.log2(s.nneus)) == np.log2(s.nneus)))
         
         s.nneusUser = list(s.nneus)
         # layer is [0,..] indx is [0,..]
@@ -197,10 +231,15 @@ class snn:
                                dtype = [('srcL','i4'),('srcN','i4'),('destL','i4'),('destN','i4'),('wt','f4')])            
             connOut['srcL'], connOut['destL'] = srcLayer, destLayer
             connOut['srcN'], connOut['destN'] = srcNArrs, destNArrs
+            assert (all(destNArrs < s.nneus[destLayer]))
+            print('DL: %d, MaxDN: %d' % (destLayer,np.max(destNArrs)))
+            
             connOut['wt'] = weightArrs
             s.connections += connOut.tolist()
-            np.save('randLayerConn_%d' % srcLayer, connOut)
+            if s.save_arrays: np.save('randLayerConn_%d' % srcLayer, connOut)
             
+#        [print(str((sl,sn)) + '->' + str((dl,dn))) for (sl,sn,dl,dn,_) in s.connections]
+        
         # for connxns to other layers or to same layer
         from itertools import groupby
         from collections import defaultdict
@@ -212,7 +251,7 @@ class snn:
         
         # if any connxn starts at the end layer, then put another layer on top
         if s.connections and (np.asarray(s.connections)[:,0] == (len(s.nneus)-1)).any():
-            s.nneus += [1]
+            s.nneus += [0]
         
         # select source layer
         for layer in range(len(s.nneus)):
@@ -227,55 +266,132 @@ class snn:
                 if (destL == (layer+1)):
                     s.makeSynsWeight += [(layer,src,destN,wt) for src, wt in zip(srcs,wts)]
                 else:
+                    # if destination is not in next layer, add new layer to 
+                    # next layer and adjust its offset to real destination
                     s.makeSynsWeight += [(layer,src,s.nneus[layer+1],wt) for src,wt in zip(srcs,wts)]
                     s.postNOffsets[(layer+1,s.nneus[layer+1])] = (destL,destN)
                     s.nneus[layer+1] += 1
-            
+         
+#        print('Next')
+#        [print('%d: %d -> %d (next layer)' % (l,src,dn)) for (l,src,dn,_) in s.makeSynsWeight]        
+        
         s.postNOffsetsArray = np.zeros((sum(s.nneus),), dtype = np.int16)
         for ((srcL,srcN),(destL,destN)) in s.postNOffsets.iteritems():
             s.postNOffsetsArray[s.absPos((srcL,srcN))] = s.absPos((destL,destN)) - s.absPos((srcL,srcN))
         
-        #print("Make syns: %s" % str(s.makeSynsWeight))
+#        print(s.nneus)
         #print("Post N Offsets array: %s" % str(s.postNOffsetsArray))
         
-        s.timeOfItr = lambda itr: s.dt * itr
-
-        if s.timed:  s.tstep, s.ttimed, s.reset = timeDisplay(10)
-        else:        s.tstep, s.ttimed, s.reset = lambda x: (), lambda: (), lambda: ()
-
-        if s.singleItr:
-            s.stoptime = s.dt
-        s.iterations = int(np.ceil(s.stoptime / s.dt))
-
-        s.logNs = (any(s.enable_Log[:2]) and map(s.absPos, s.nTrace)) or []
-        s.logNs = sorted(s.logNs)
-        
-        s.nlegend = map(lambda x: "N %d.%d" % x, s.nTrace)
         syns = []
-
+        sP_cache = [np.zeros((s.nneus[i],s.nneus[i+1]), dtype = tpWeight) for i in range(len(s.nneus)-1)]
+        
         import random
         if s.randSyns:
             for i in range(1, len(s.nneus)):
-                syns.append([(x, y, s.defWt)
+                #syns.append
+                    ([(sP_cache[i-1].__setitem__((x,y),s.defWt) or (x, y, s.defWt))
                                 for x in range(s.nneus[i - 1])
                                     for y in np.sort(random.sample(
                                                         range(s.nneus[i]),
                                                         min([s.randSyns,
                                                              s.nneus[i]])))])  # (src,des) all to any 1
         else:
-            syns = [[]] * (len(s.nneus) - 1)
+            #syns = [[]] * (len(s.nneus) - 1)
+            pass
 
         # 1. connect (2+1)th neu from 1st layer to (1+1)th neu in 2nd
+                
+        Dn_dict = defaultdict(int)
         
+        s.tstep('Making syns #1')
+                        
         for preLayer, src, dest in s.makeSyns:
-            if not (src, dest) in syns[preLayer]:
-                syns[preLayer].append((src, dest, s.defWt))
+            sP_cache[preLayer][src,dest] += s.defWt;
+            #if not (src, dest) in syns[preLayer]:
+            #    syns[preLayer].append((src, dest, s.defWt))
+            #    sP_cache[preLayer][src,dest] = 1;
+                
+#        [sP_cache[preLayer].__setitem__((src,dest), sP_cache[preLayer][src,dest] + weight)
+#            for preLayer, src, dest, weight in s.makeSynsWeight]                
         for preLayer, src, dest, weight in s.makeSynsWeight:
-            if not (src, dest) in syns[preLayer]:
-                syns[preLayer].append((src, dest, weight))
+            sP_cache[preLayer][src,dest] += weight;
+            # no overlapping connections
+            # if not (src, dest) in syns[preLayer]:   # slow
+            
+            #Dn_dict[preLayer+1] = max(Dn_dict[preLayer+1],dest)
+            
+            #if not sP_cache[preLayer][src,dest]:
+            #    syns[preLayer].append((src, dest, weight))
+            #    sP_cache[preLayer][src,dest] = 1
+        
+        sP_cache2 = []
+        
+        # for each dest (Dx), if count of src > max_work_group_size[0] (mw)
+        for srcL, sP in enumerate(sP_cache):
+            sPn = sP.copy()
+            if (srcL == 1):
+                import pdb; pdb.set_trace()
+            srcsPerDest = np.sum((np.abs(sPn) > s.minWt), axis = 0)
+            excsDests = srcsPerDest[srcsPerDest > s.device.max_work_group_size]
+            excsDestNs = sum(map(int, np.ceil(excsDests/s.device.max_work_group_size)))
+            newColIndx = sPn.shape[1]
+            sPn = np.hstack((sPn, np.zeros((sPn.shape[0],excsDestNs), dtype = sPn.dtype)))
+            for dx,srcs in enumerate(sP.T):
+                srcs = np.where(np.abs(srcs) > s.minWt)[0]                
+                while (srcs.shape[0] > s.device.max_work_group_size):
+                    takeSrcs = srcs[:s.device.max_work_group_size]
+                    sPn[takeSrcs,dx] = 0
+                    #   make new dest (Dn, at end of next (destination) layer), take mw sources
+                    srcs = srcs[s.device.max_work_group_size:]         
+                    newCol = np.zeros((sP.shape[0],))
+                    newCol[takeSrcs] = sP[takeSrcs,dx]
+#                    newCol = np.asarray([sP[src,dx]*(src in takeSrcs) for src in range(sP.shape[0])]).reshape((-1,1))
+                    #sPn = np.hstack((sPn,newCol))     # expensive
+                    sPn[:,newColIndx] = newCol
+                    newColIndx += 1;
+                    #   insert new entry at postNOffsets for Dn, with absPos(Dn-Dx)
+                    s.postNOffsetsArray = np.hstack((s.postNOffsetsArray[:sum(s.nneus[:srcL+2])],np.array([dx-s.nneus[srcL+1]], dtype = np.int16)))
+                    if (srcL + 1 + 1 < len(s.nneus)):
+                        s.postNOffsetsArray = np.hstack((s.postNOffsetsArray,s.postNOffsetsArray[sum(s.nneus[:srcL+2]):]))
+                    s.nneus[srcL+1] += 1
+            sP_cache2.append(sPn)
+        
+        sP_cache = sP_cache2    
+        
+        s.tstep('Making syns #2')        
+        
+        syns = []
+        for sP in sP_cache:
+            ssyns = np.zeros((0,3), dtype = np.int)
+            for src in range(sP.shape[0]):
+                d = np.where(np.abs(sP[src,:]) > s.minWt)[0]        
+                z = np.zeros((len(d),3), dtype = np.int)
+                z[:,0] = src
+                z[:,1] = d
+                z[:,2] = sP[src,d]
+                ssyns = np.vstack((ssyns,z))
+                # ssyns.extend([(src,d,w) for d,w in enumerate(sP[src,:]) if abs(w) > s.minWt])                
+            syns.append(ssyns.tolist())
+                 
+#        syns = [reduce(lambda x,y: x+y, [[(src,d,w) for d,w in enumerate(sp[src,:]) 
+#                                                if abs(w) > s.minWt]
+#                                            for src in range(sp.shape[0])]) 
+#                    for sp in sP_cache]
+
+        s.tstep('Making syns #3')
+        
+        print(Dn_dict)
+        try:
+            print(['L %d: MaxD: %d' % (l+1,max([dd for _,dd,_  in sy])) for l,sy in enumerate(syns)])
+        except ValueError:          # printing is not that important
+            pass
+        
         s.syns = syns
+        if s.save_arrays:
+            np.save('postNoff',s.postNOffsetsArray)
         np.save('synapses',syns)
-        np.save('postNoff',s.postNOffsetsArray)
+        
+        print(">>  Debug: %s" % str([np.sum(sP_cache[i][:,:]) for i in range(len(sP_cache))]));
         
         if s.showSyns:
             for l,ls in enumerate(syns):
@@ -286,7 +402,16 @@ class snn:
                                                                   s.postNOffsetsArray[s.absPos((l+1,cs[1]))]))))
 
         s.profiling = False
+        
+        if s.singleItr:
+            s.stoptime = s.dt
+        s.iterations = int(np.ceil(s.stoptime / s.dt))
 
+        s.logNs = (any(s.enable_Log[:2]) and map(s.absPos, s.nTrace)) or []
+        s.logNs = sorted(s.logNs)
+        
+        s.nlegend = map(lambda x: "N %d.%d" % x, s.nTrace)
+        
         s.resetAt = map(lambda x: int(np.floor(x / s.dt)), s.resetAt)
         print("Reset at iterations ", s.resetAt)
 
@@ -295,7 +420,7 @@ class snn:
 
     def initBuffers(self):
         s = self
-        s.tstep('Started initBuffers.')
+        s.tstep('Initialising buffers.')
         # TODO: if opencl supports -Inf (IEEE float), consider using that ?
         spks = -1 * np.inf * np.ones(sum(s.nneus), dtype= np.float32)
         spksOut = spks.copy()
@@ -312,12 +437,16 @@ class snn:
                     if l == 0: startInd = 0
                     else: startInd = sum(s.nneus[0:(l-1)])
                     stopInd = startInd + s.nneusUser[l]
-                    current[startInd:stopInd] = m + np.random.rand(stopInd - startInd) * sd
-                    
+                    print('%d .. %d' % (startInd,stopInd))
+                    current[startInd:stopInd] = m + (np.random.rand(stopInd - startInd) - 0.5) * sd
+        
         for p in s.currentAt.keys():
-            current[s.absPos(p)] = s.currentAt[p]
-        #print("Currents: %s" % str(current))
-
+            current[s.absPos(p)] = s.currentAt[p]            
+        
+        s.currentIn = current
+        print("Min Current: %s" % str(np.min(current[:s.nneusUser[0]])))
+#        exit()
+        
         ctime = np.array([0], dtype=np.float32)
         s.logNs.sort()
         logIndices = np.zeros_like(potn, dtype=np.int32)
@@ -351,6 +480,7 @@ class snn:
         if len(s.nneus) > 1 :
             # no propagation for single layer
             # propSize: (preN, postN, layer) -> (preN, 1, 1)
+            
             s.propSize = (
                 (1 + max(s.nneus[0:-1]), max(s.nneus[1:]), len(s.nneus)), 
                 (1 + max(s.nneus[0:-1]), 1, 1))
@@ -365,7 +495,12 @@ class snn:
             s.spkSize = [(s.neuSize[0][0], s.neuSize[0][1], len(s.nneus)),None]
         else:
             s.spkSize = [(1 + s.neuSize[0][0]/8, 1 + s.neuSize[0][1]/8, len(s.nneus)),None]
+           
         s.spkSize[1] = (s.spkSize[0][0],s.spkSize[0][1],1)
+        
+        # for spikedLog3
+        s.spkSize = (s.neuSize[0], (32,1,1))
+        assert(wd1 % 32 == 0)
         
         s.dispWS = lambda: print('Neuron WG,WI: %s; \nSynapse WG,WI: %s; \nSpikeLog WG,WI: %s'
                                % (str(s.neuSize), str(s.propSize), str(s.spkSize)))
@@ -377,6 +512,7 @@ class snn:
               (s.maxPreN, s.iterations, str(nOffsets)))
         #print('logIndices = %s' % str(logIndices))
         s.tstep('Allocating buffers on device.')
+#        exit()
 
         s.cl_potn = cl.Buffer(
             s.context, cl.mem_flags.COPY_HOST_PTR, hostbuf=potn)
@@ -489,7 +625,7 @@ class snn:
             s.cl_logWtSz = cl.Buffer(s.context, cl.mem_flags.READ_ONLY |
                                      cl.mem_flags.COPY_HOST_PTR, hostbuf=np.array([sWeights.shape[0]]))
             s.logWt = logWt
-        if s.enable_Log[2]:
+        if s.enable_Log[2] or s.recordSpikes:
             s.cl_logSpk = cl.Buffer(
                 s.context, cl.mem_flags.WRITE_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=logSpks)
             s.cl_logSpkOut = cl.Buffer(
@@ -500,7 +636,6 @@ class snn:
                 s.context, cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR, hostbuf=np.array([spkOffsets[-1]], dtype=np.int32))
 
         if s.logBuffers:
-            # TODO: buf should only be numpy.array not cl.Buffer
             for fname, buf in [('cl_potn', potn), ('cl_recov', potn), ('cl_currnt', current), ('cl_spks', spks), ('cl_nOffsets', nOffsets), ('cl_ctime', ctime),('cl_sPreNs', sPreNs), ('cl_sPreOffs', sPreOffs), ('cl_sOffsets',sOffsets), ('cl_sWeights', sWeights),  ('cl_logInd', logIndices), ('cl_logSz', logSz), ('cl_logPot', logPot), ('cl_logSpk', s.cl_logSpk), ('cl_logSpkOffset', s.cl_logSpkOffset),('cl_logSpkItrOffset', s.cl_logSpkItrOffset), ('cl_hasSpiked', s.cl_hasSpiked)]:
                 try:
                     np.savetxt('./logs/' + fname + '.csv', buf, fmt='%1d')
@@ -557,7 +692,7 @@ class snn:
             from re import sub
             kernelstr = sub(regExPrintf,"0",kernelstr);
         
-        if displayCode:
+        if True or displayCode:
             code_save_file = 'kernel_code_out.cl'
             with open(code_save_file,'w') as f:
                 f.write('/*  Do not modify, will be overwritten.\nneuSyn1.cl is the one to modify.\n  */\n\n')
@@ -589,6 +724,7 @@ class snn:
         s.logCurKernel = build.log_var
         s.logSpiked = build.spikedLog
         s.logSpiked2 = build.spikedLog2
+        s.logSpiked3 = build.spikedLog3
         s.logWeights = build.log_all
         s.incTime = build.increment_time
         s.tstep('Kernels built.')
@@ -610,8 +746,9 @@ class snn:
         s = self
         s.tstep('Running kernels.')
 
-        #s.dispWS()
-        s.ttimed()
+        curIteration = np.zeros((1,), dtype = np.int32)
+        s.ttimed(lambda : curIteration[0], int(s.iterations))
+        
         treset = s.reset
         stdout.flush()
 
@@ -633,7 +770,7 @@ class snn:
         if s.relaxAt: s.relaxAt /= s.dt
 #        print(s.propSize)
         try:
-            clk_start = clock()
+            clk_start = time()
             print(r'\\\\')
             for itr in range(s.iterations):
                 #if itr > 0: break
@@ -641,8 +778,6 @@ class snn:
                     print("Relax")
                     cl.enqueue_copy(s.queue, s.cl_currnt, pzeros)
                 #'''
-                if s.iterations > 10 and (itr % (s.iterations//10) == 0):
-                    print("Completed %d of %d iterations." % (itr, s.iterations))
                     
                 if itr in s.resetAt:
                     s.reset_states(s.queue, s.neuSize[0], s.neuSize[1],
@@ -696,12 +831,12 @@ class snn:
                      wrkr = s.logCurKernel(s.queue, (max(s.nneus), len(s.nneus), 1), None,
                                            s.cl_currnt, s.cl_nOffsets, s.cl_itr,
                                            s.cl_logInd, s.cl_logSz, s.cl_logcur)
-                if s.enable_Log[2]:
-                     wrkr = s.logSpiked2(s.queue, s.spkSize[0], s.spkSize[1],
+                if s.enable_Log[2] or s.recordSpikes:
+                     wrkr = s.logSpiked3(s.queue, s.spkSize[0], s.spkSize[1],
                                          s.cl_spks, s.cl_hasSpiked, s.cl_spksOut, s.cl_nOffsets,
                                          s.cl_logSpk, s.cl_logSpkOut,
                                          s.cl_logSpkOffset, s.cl_logSpkItrOffset,
-                                         s.cl_itr, s.cl_ctime)                
+                                         s.cl_itr, s.cl_ctime)           
                 #'''
                 #'''
                 if s.propSize:
@@ -733,34 +868,34 @@ class snn:
                 #'''
                 
                 wrkr = s.incTime(s.queue, (1, 1, 1), None, s.cl_ctime, s.cl_itr)
-                wrkr.wait()
-                                
+                if (itr % 500 == 0):
+                    cl.enqueue_copy(s.queue, curIteration, s.cl_itr)
+                    
+            wrkr.wait()
+            cl.enqueue_copy(s.queue, curIteration, s.cl_itr).wait()
+            treset()
+            print("Completed all (%d/%d) iterations" % (curIteration[0],s.iterations))            
+            
             print(r'////')
             if s.enable_RunStats:
-                print("Neurons: " + str(s.nneus))
-                if s.propSize:
-                    print("Average synapses/layer, Net: " +
-                            str(sum(map(len, s.syns)) / len(s.syns)) +
-                            ", " + str(sum(map(len, s.syns))))
+                print("Neurons: " + str(s.nneusUser))
+                if s.propSize:                    
+                    print("Average synapses/layer: %d, Net: %d" %
+                            ((sum(map(len, s.syns)) / len(s.syns)), sum(map(len, s.syns))))
                 print("Runtime: %0.3f, Speed: %0.2fX" %
-                      (clock() - clk_start, s.stoptime / (clock() - clk_start)))
+                      (time() - clk_start, s.stoptime / (time() - clk_start)))
                 print("Kernel Sizes: " + str((s.neuSize, s.propSize, s.spkSize)))
         except cl.LogicError, e:
-            print(e)
-            s.dispWS()
-            raise
-        except RuntimeError, e:
             print('Iteration: %d\nError!' % itr)
             #print(open(sys.argv[0], 'rb').readlines()[sys.exc_traceback.tb_lineno])
             print(e)
             d = s.device
             print("%s %s %s\n\r" % (d.vendor, d.name, d.version))
-            print("Max workitem size: %d,%d,%d" % (
-                d.max_work_item_sizes[0], d.max_work_item_sizes[1], d.max_work_item_sizes[2]))
-            print("Max workgroup size: %d" % (d.max_work_group_size))
+            print("Max workitem size: %d,%d,%d" % d.max_work_item_sizes)
+            print("Max workgroup size: %d" % d.max_work_group_size)
             raise
         else:
-            print("Reading buffer")
+            s.tstep("Reading buffer")
             cl.enqueue_read_buffer(s.queue, s.cl_spks, s.spks)
             cl.enqueue_read_buffer(s.queue, s.cl_hasSpiked, s.hasSpkd).wait()
             if s.relaxAt:
@@ -768,31 +903,7 @@ class snn:
                 cl.enqueue_read_buffer(s.queue, s.cl_currnt, curr).wait()
                 if np.sum(np.abs(curr)) == 0:
                     print("Zeroed current.")
-            '''
-            ibuf = np.empty(sum(s.nneus), dtype = np.int32)
-            cl.enqueue_read_buffer(s.queue, s.cl_spInIndex, ibuf).wait()
-            print(ibuf)
-            print("out buffer")
-            ibuf = np.empty(sum(s.nneus), dtype = np.int32)
-            cl.enqueue_read_buffer(s.queue, s.cl_spOutIndex, ibuf).wait()
-            print(ibuf)                        
-            
-            sWeights = np.zeros_like(s.sWeightInit)
-            cl.enqueue_read_buffer(s.queue, s.cl_sWeights, sWeights).wait()
-            print(sWeights)
-            print(s.sWeightInit)
-            
-            d = np.zeros_like(s.potn)
-            cl.enqueue_read_buffer(s.queue, s.cl_d_r1, d).wait()
-            print(d)
-            cl.enqueue_read_buffer(s.queue, s.cl_d_r2, d).wait()
-            print(d)
-            cl.enqueue_read_buffer(s.queue, s.cl_d_o2, d).wait()
-            print(d)
-            cl.enqueue_read_buffer(s.queue, s.cl_d_o1, d).wait()
-            print(d)
-            '''
-            np.save('hasSpkd',s.hasSpkd)
+            if s.save_arrays: np.save('hasSpkd',s.hasSpkd)
             if np.any(s.hasSpkd):print("Some spiked")
 
             outTimes = [(s.hasSpkd[on] > 0 and s.spks[on]) or -1 for on in s.outNeu]
@@ -856,14 +967,15 @@ class snn:
                 axs.append(ax4)
             else:
                 wt_lines = ()
-            if s.enable_Log[2]:
+            if s.enable_Log[2] or s.recordSpikes:
                 print("Spike plot")
                 cl.enqueue_read_buffer(s.queue, s.cl_logSpk, s.logSpks).wait()
                 #bt = lambda s: int(s.replace(' ',''), base=2)
-                np.save('logSpks',s.logSpks) or print('Saved spk.')
+                if s.save_arrays: np.save('logSpks',s.logSpks) or print('Saved spk.')
                 chunk = int(s.spkOffsets[-1])
                 x = np.zeros((sum(s.nneus), s.iterations))
                 s.spikeOuts = defaultdict(list)
+                s.tstep("Preparing spike raster plot.")
                 
                 for itr in range(1, s.iterations):
                     b = s.logSpks[chunk * (itr - 1):(chunk * itr)]
@@ -887,24 +999,28 @@ class snn:
                 for layer,(netNeus,actNeus) in enumerate(zip(s.nneus,s.nneusUser)):
                     xx[i:(i+actNeus)] = x[sum(s.nneus[:layer]):(sum(s.nneus[:layer])+actNeus)]
                     i += actNeus
-                np.save('log_spkPlot',xx) or print('Saved spike raster to log_spkPlot')
+                if s.save_arrays: np.save('log_spkPlot',xx) or print('Saved spike raster to log_spkPlot')
+                
                 s.spikeRaster = xx
                 
-                subplotIndx += 1
-                if axs == []:
-                    ax3 = fig.add_subplot(subplotIndx)
-                else:
-                    ax3 = fig.add_subplot(subplotIndx, sharex=axs[0])
-                ax3.imshow(xx, aspect='auto', cmap = 'hot').set_interpolation('none')                
-                ax3.xaxis.set_major_formatter(ticks)
-                ax3.set_title('Plasticity: %s' % s.plasticity)
-                axs.append(ax3)   
-                try:
-                    firstSpikeItr = np.where(xx > 0)[1][0]
-                except IndexError:
-                    print("No spikes :(")
-                else:
-                    ax3.set_xlim([firstSpikeItr - 10,s.iterations])
+                if s.enable_Log[2]:
+                    s.tstep("Drawing plot.")
+                
+                    subplotIndx += 1
+                    if axs == []:
+                        ax3 = fig.add_subplot(subplotIndx)
+                    else:
+                        ax3 = fig.add_subplot(subplotIndx, sharex=axs[0])
+                    ax3.imshow(xx, aspect='auto', cmap = 'hot').set_interpolation('none')                
+                    ax3.xaxis.set_major_formatter(ticks)
+                    ax3.set_title('Plasticity: %s' % s.plasticity)
+                    axs.append(ax3)   
+                    try:
+                        firstSpikeItr = np.where(xx > 0)[1][0]
+                    except IndexError:
+                        print("No spikes :(")
+                    else:
+                        ax3.set_xlim([firstSpikeItr - 10,s.iterations])
                 
             if any(s.enable_Log):
                 try:
@@ -914,9 +1030,9 @@ class snn:
                     print(e)
                 else:
                     print("Saved to result.png")
-            s.axes = axs
-            s.subplotIndx = subplotIndx
-            s.fig = fig
+                s.axes = axs
+                s.subplotIndx = subplotIndx
+                s.fig = fig
         finally:
             treset()
             
@@ -978,12 +1094,40 @@ class snn:
     def drawNet(self):
         import networkx as nx
         G = nx.DiGraph()
-        edg = reduce(lambda x, y: x + y,
-                     map(lambda (ln, ls):
-                         map(lambda (s, d, w):
-                             ('N%d.%d' % (ln, s), 'N%d.%d' % (ln + 1, d), {'weight': w}), ls),
-                         enumerate(self.syns)))
-
+        def realDest(l,n):
+            a1 = self.absPos((l,n))
+            try:                
+                x = self.relPos(self.postNOffsetsArray[a1] + a1)
+            except IndexError:
+                print('Error for %s' % str((l,n,a1)))
+                raise
+                return (0,0)
+            return x
+        
+        try:
+            edg = reduce(lambda x, y: x + y,
+                         map(lambda (ln, ls):
+                             map(lambda (s, d, w):
+                                 ('N%d.%d' % (ln, s), 
+                                  'N%d.%d' % realDest(ln + 1, d), 
+                                  {'weight': w}), ls),
+                             enumerate(self.syns)), [])
+        except TypeError:
+            for sy in self.syns:
+                print([(s,d) for (s,d,_) in sy])
+            raise
+        from collections import defaultdict
+        nTos = defaultdict(list)
+        for (s,d,_) in edg:
+            nTos[d].append(s)
+        
+        return nTos
+        print(self.nneus)
+        for d,sl in nTos.iteritems():
+            if d[1] == '0':
+                if (int(d[3:]) > 40):
+                    print(d,sl)
+        
         #G.add_edges_from([('A', 'B'), ('A', 'C'), ('D', 'B'), ('E', 'C'), ('E', 'F'),('B', 'H'), ('B', 'G'), ('B', 'F'), ('C', 'G')])
         G.add_edges_from(edg)
 
@@ -1013,63 +1157,9 @@ class snn:
 if __name__ == '__main__':
     s = snn()
     s.init()
-    s.run()
+#    s.run()
 
     # s.drawNet()
     #for i in range(2):
     #    print('Runtime %d' % (i+1))
     #    print(s.run())
-    
-'''
-TODO:
-    issues:-
-        1. clEnqueueNDRangeKernel failed: out of resources @ 336 on lab pc for nvidia card
-'''
-
-
-def offsets(nneus, syns):
-    '''
-    nneus = [9,5,2]
-    syn1 = zip([0,1,5,6,8],[0]*5,[1]*5) + zip([2,3,5],[1]*3,[2]*3) + zip([1,4,7],[2]*3,[2]*3)
-    syn2 = zip([1,2],[0]*2,[1]*2) + zip([2,4],[1]*2,[1]*2)
-    syn3 = zip([0,1]*2,[0]*2,[0]*2) '''
-
-    nOffsets = np.array(
-        [sum(nneus[0:i]) for i in range(len(nneus))] + [sum(nneus)], dtype=np.int32)
-    sPreNs = []
-    sWeights = []
-    sPreOffs = []
-    sOffsets = []
-    preNCounts = []
-
-    for syn in syns:
-        postNs = np.unique(map(lambda x: x[1], syn)).tolist()
-        for postN in postNs:
-            preNs = filter(lambda x: x[1] == postN, syn)
-            sPreNs += map(lambda x: x[0], preNs)
-            sWeights += map(lambda x: x[2], preNs)
-            sPreOffs.append(len(preNs))
-            preNCounts.append(len(preNs))
-        sOffsets.append(len(postNs))
-
-    sPreOffs = np.array([sum(sPreOffs[0:i])
-                         for i in range(len(sPreOffs))], dtype=np.int32)
-    sOffsets = np.array([sum(sOffsets[0:i])
-                         for i in range(len(sOffsets))], dtype=np.int32)
-    sPreNs = np.array(sPreNs, dtype=np.int32)
-    sWeights = np.array(sWeights, dtype=np.float32)
-    return (sPreNs, sPreOffs, sOffsets, sWeights, nOffsets, max(preNCounts))
-
-def tests(what):
-    if what == 'offset':
-        nneus = [9, 5, 2]
-        syn1 = zip([0, 1, 5, 6, 8], [0] * 5, [1] * 5) + zip([2, 3, 5],
-                                                            [1] * 3, [2] * 3) + zip([1, 4, 7], [2] * 3, [2] * 3)
-        syn2 = zip([1, 2], [0] * 2, [1] * 2) + zip([2, 4], [1] * 2, [1] * 2)
-        syn3 = zip([0, 1] * 2, [0] * 2, [0] * 2)
-        print(offsets2(nneus, [syn1, syn2, syn3]))
-    elif what == 'timer':
-        step, auto, reset = timeDisplay(3)
-        auto()
-        sleep(10)
-        reset()
