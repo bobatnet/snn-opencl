@@ -329,8 +329,6 @@ class snn:
         # for each dest (Dx), if count of src > max_work_group_size[0] (mw)
         for srcL, sP in enumerate(sP_cache):
             sPn = sP.copy()
-            if (srcL == 1):
-                import pdb; pdb.set_trace()
             srcsPerDest = np.sum((np.abs(sPn) > s.minWt), axis = 0)
             excsDests = srcsPerDest[srcsPerDest > s.device.max_work_group_size]
             excsDestNs = sum(map(int, np.ceil(excsDests/s.device.max_work_group_size)))
