@@ -51,9 +51,9 @@ axr.set_title('Average f.rates')
 np.save('sprates', spall)
 #'''
 
-tos = s.drawNet()
+#tos = s.drawNet()
 
-toA = np.array([(s.absPos((int(k[1]),int(k[3:]))) ,len(ll)) for (k,ll) in tos.iteritems()])
+#toA = np.array([(s.absPos((int(k[1]),int(k[3:]))) ,len(ll)) for (k,ll) in tos.iteritems()])
 
 #if len(toA.shape) == 2: axr.bar(toA[:,0],toA[:,1])
 
